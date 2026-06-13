@@ -11,7 +11,7 @@ Narrator AI CLI is the command-line tool for [Narrator AI](https://ai.jieshuo.cn
 > "Create a movie narration video for Pegasus in a comedy style"
 
 The AI handles everything automatically:
-
+   
 ```
 Select movie → Match narration style → Generate script → Compose video → Output download link
 ```
