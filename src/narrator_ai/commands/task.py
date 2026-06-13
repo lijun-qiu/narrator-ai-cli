@@ -461,7 +461,7 @@ def search_movie(
         if json_mode:
             print_json(data)
         else:
-            results = data.get("data", data)
+            results = data if isinstance(data, list) else data.get("data", data)
             if isinstance(results, list):
                 for i, item in enumerate(results, 1):
                     console.print(f"\n[bold cyan]Result {i}[/bold cyan]")

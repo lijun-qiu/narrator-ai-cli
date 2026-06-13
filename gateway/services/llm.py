@@ -8,23 +8,31 @@ import re
 import httpx
 
 from gateway.config import settings
+from gateway.services.models import resolve_llm_model
 
 
 class LLMError(Exception):
     pass
 
 
-async def chat(messages: list[dict], *, temperature: float = 0.7) -> str:
+async def chat(
+    messages: list[dict],
+    *,
+    model: str | None = None,
+    tier: str | None = None,
+    temperature: float = 0.7,
+) -> str:
     if not settings.llm_api_key:
         raise LLMError("LLM API key not configured. Set LLM_API_KEY in gateway/.env")
 
+    model_name = model or resolve_llm_model(tier)
     url = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
     payload = {
-        "model": settings.llm_model,
+        "model": model_name,
         "messages": messages,
         "temperature": temperature,
     }
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=180.0) as client:
         resp = await client.post(
             url,
             headers={"Authorization": f"Bearer {settings.llm_api_key}", "Content-Type": "application/json"},

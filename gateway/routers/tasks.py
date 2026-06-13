@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from fastapi import APIRouter, BackgroundTasks
@@ -14,6 +13,7 @@ from gateway.services.processor import (
     process_generate_writing,
     process_video_composing,
 )
+from gateway.services.learning_processor import process_popular_learning
 from gateway.services.writing import search_movie
 from gateway.store import store
 
@@ -21,22 +21,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def _stub_popular_learning(task_id: str) -> None:
-    store.update_task(task_id, status=1)
-    await asyncio.sleep(0.5)
-    store.update_task(
-        task_id,
-        status=2,
-        task_order_num=f"popular_learning_{task_id[:12]}",
-        results={"learning_model_id": "gateway-stub-model", "agent_unique_code": "gateway-stub-model"},
-        consumed_points=0,
-    )
-
-
 @router.post("/v2/task/commentary/create_popular_learning")
 def create_popular_learning(body: dict, background: BackgroundTasks):
     rec = store.create_task("popular_learning", body)
-    background.add_task(_stub_popular_learning, rec.task_id)
+    background.add_task(process_popular_learning, rec.task_id)
     return ok({"task_id": rec.task_id})
 
 
@@ -105,9 +93,10 @@ def create_tts(body: dict, background: BackgroundTasks):
 
 
 async def _process_tts(task_id: str) -> None:
-    from gateway.services.tts import resolve_voice, synthesize_to_file
-    import tempfile
     from pathlib import Path
+
+    from gateway.services.tts import synthesize_for_dubbing
+    from gateway.services.workspace import work_directory
 
     rec = store.get_task(task_id)
     if not rec:
@@ -115,10 +104,16 @@ async def _process_tts(task_id: str) -> None:
     store.update_task(task_id, status=1)
     try:
         text = rec.body.get("audio_text", "")
-        voice = resolve_voice(rec.body.get("voice_id", ""), "普通话")
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "tts.mp3"
-            await synthesize_to_file(text, voice, out)
+        tier = rec.body.get("clone_model", "pro")
+        with work_directory("tts_") as work:
+            out = work / "tts.mp3"
+            await synthesize_for_dubbing(
+                text,
+                rec.body.get("voice_id", ""),
+                "普通话",
+                out,
+                tier=tier,
+            )
             frec = store.save_output(f"tts_{task_id[:8]}.mp3", out.read_bytes(), "audio/mpeg")
         store.update_task(
             task_id,
@@ -136,6 +131,41 @@ def query_task(task_id: str):
     if not rec:
         return err(10010, "Task not found")
     return ok(store.task_to_query(rec))
+
+
+@router.post("/v2/task/commentary/retry/{task_id}")
+def retry_task(task_id: str, background: BackgroundTasks):
+    rec = store.get_task(task_id)
+    if not rec:
+        return err(10010, "Task not found")
+    if rec.status != 3:
+        return err(10001, "Only failed tasks can be retried")
+
+    store.update_task(task_id, status=0, error_message="")
+
+    task_type = rec.task_type
+    if task_type == "fast_writing":
+        background.add_task(process_fast_writing, task_id)
+    elif task_type == "generate_writing":
+        background.add_task(process_generate_writing, task_id)
+    elif task_type == "clip_data":
+        async def run():
+            await process_clip_data(task_id, fast=False)
+        background.add_task(run)
+    elif task_type == "fast_clip_data":
+        async def run():
+            await process_clip_data(task_id, fast=True)
+        background.add_task(run)
+    elif task_type == "video_composing":
+        background.add_task(process_video_composing, task_id)
+    elif task_type == "tts":
+        background.add_task(_process_tts, task_id)
+    elif task_type == "popular_learning":
+        background.add_task(process_popular_learning, task_id)
+    else:
+        return err(10001, f"Task type {task_type} cannot be retried")
+
+    return ok({"task_id": task_id, "status": 0})
 
 
 @router.get("/v2/task/commentary/list")
@@ -188,7 +218,8 @@ def save_clip(body: dict):
 async def search_media(query: str):
     try:
         results = await search_movie(query)
-        return ok({"data": results})
+        # CLI: data.get("data", data) — 直接返回数组
+        return ok(results)
     except Exception as e:
         logger.exception("search_movie failed")
         return err(10001, str(e))

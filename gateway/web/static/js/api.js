@@ -102,7 +102,21 @@ const API = {
 
   /* --- Tasks --- */
   searchMovie(query) {
-    return this.get("/v2/task/commentary/search_media_information", { query });
+    const url = `${this.base}/v2/task/commentary/search_media_information?${new URLSearchParams({ query })}`;
+    return fetch(url, { headers: this.headers(), signal: AbortSignal.timeout(120000) })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.code !== 10000) {
+          const err = new Error(data.message || `Error ${data.code}`);
+          err.code = data.code;
+          throw err;
+        }
+        const payload = data.data;
+        // 兼容数组或 { data: [...] } 两种格式
+        if (Array.isArray(payload)) return payload;
+        if (payload && Array.isArray(payload.data)) return payload.data;
+        return payload ? [payload] : [];
+      });
   },
 
   createTask(type, body) {
@@ -124,6 +138,10 @@ const API = {
     const params = { page, limit: 20 };
     if (status !== "" && status !== undefined) params.status = status;
     return this.get("/v2/task/commentary/list", params);
+  },
+
+  retryTask(taskId) {
+    return this.post(`/v2/task/commentary/retry/${taskId}`);
   },
 
   async pollTask(taskId, { interval = 3000, timeout = 600000, onTick } = {}) {

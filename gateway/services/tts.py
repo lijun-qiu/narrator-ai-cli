@@ -1,39 +1,110 @@
-"""Text-to-speech via edge-tts (no extra API key)."""
+"""TTS via OpenAI-compatible /audio/speech (gpt-4o-mini-tts), edge-tts fallback."""
 
 from __future__ import annotations
 
-import asyncio
+import logging
 import subprocess
-import tempfile
 from pathlib import Path
 
-# dubbing id prefix hints -> edge-tts voice
-VOICE_MAP = {
-    "MiniMaxVoiceId15553": "zh-CN-YunxiNeural",
-    "MiniMaxVoiceId15619": "zh-CN-YunjianNeural",
-    "mercury_yunxi_24k": "zh-CN-YunxiNeural",
-    "mercury_yunye_24k@serious": "zh-CN-YunyangNeural",
-    "mercury_guy_48k": "en-US-GuyNeural",
-    "default": "zh-CN-YunxiNeural",
+import httpx
+
+from gateway.config import settings
+from gateway.services.models import resolve_tts_model
+
+logger = logging.getLogger(__name__)
+
+# dubbing id / language -> OpenAI TTS voice (gpt-4o-mini-tts)
+OPENAI_VOICE_MAP = {
+    "MiniMaxVoiceId15553": "onyx",  # 解说男声
+    "MiniMaxVoiceId15619": "onyx",  # 浑厚旁白
+    "MiniMaxVoiceId15944": "echo",  # 知心哥哥
+    "MiniMaxVoiceId16317": "nova",  # 温暖男声
+    "mercury_yunxi_24k": "onyx",
+    "mercury_yunye_24k@serious": "onyx",
+    "mercury_guy_48k": "alloy",
+    "default": "onyx",
 }
 
 
 def resolve_voice(dubbing_id: str, dubbing_type: str) -> str:
-    if dubbing_id in VOICE_MAP:
-        return VOICE_MAP[dubbing_id]
-    if "英语" in dubbing_type or dubbing_type.lower() == "english":
-        return "en-US-GuyNeural"
+    if dubbing_id in OPENAI_VOICE_MAP:
+        return OPENAI_VOICE_MAP[dubbing_id]
+    if "英语" in dubbing_type or dubbing_type.lower() in ("english", "英语"):
+        return "alloy"
     if "日语" in dubbing_type:
-        return "ja-JP-NanamiNeural"
-    return VOICE_MAP["default"]
+        return "nova"
+    if "韩语" in dubbing_type:
+        return "shimmer"
+    return OPENAI_VOICE_MAP["default"]
 
 
-async def synthesize_to_file(text: str, voice: str, out_path: Path) -> Path:
+async def _synthesize_openai(text: str, voice: str, out_path: Path, *, tier: str | None = None) -> Path:
+    api_key = settings.tts_api_key or settings.llm_api_key
+    if not api_key:
+        raise RuntimeError("TTS API key not configured")
+
+    url = f"{settings.llm_base_url.rstrip('/')}/audio/speech"
+    model = resolve_tts_model(tier)
+    payload = {
+        "model": model,
+        "input": text,
+        "voice": voice,
+        "response_format": "mp3",
+    }
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        resp = await client.post(
+            url,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"TTS HTTP {resp.status_code}: {resp.text[:300]}")
+        out_path.write_bytes(resp.content)
+    return out_path
+
+
+async def _synthesize_edge(text: str, voice: str, out_path: Path) -> Path:
     import edge_tts
 
-    communicate = edge_tts.Communicate(text, voice)
+    edge_voice = {
+        "onyx": "zh-CN-YunxiNeural",
+        "echo": "zh-CN-YunjianNeural",
+        "nova": "zh-CN-XiaoxiaoNeural",
+        "alloy": "en-US-GuyNeural",
+        "shimmer": "ko-KR-SunHiNeural",
+    }.get(voice, "zh-CN-YunxiNeural")
+    communicate = edge_tts.Communicate(text, edge_voice)
     await communicate.save(str(out_path))
     return out_path
+
+
+async def synthesize_to_file(
+    text: str,
+    voice: str,
+    out_path: Path,
+    *,
+    tier: str | None = None,
+) -> Path:
+    if settings.tts_provider == "openai":
+        try:
+            return await _synthesize_openai(text, voice, out_path, tier=tier)
+        except Exception as e:
+            if not settings.tts_fallback_edge:
+                raise
+            logger.warning("OpenAI TTS failed (%s), falling back to edge-tts", e)
+    return await _synthesize_edge(text, voice, out_path)
+
+
+async def synthesize_for_dubbing(
+    text: str,
+    dubbing_id: str,
+    dubbing_type: str,
+    out_path: Path,
+    *,
+    tier: str | None = None,
+) -> Path:
+    voice = resolve_voice(dubbing_id, dubbing_type)
+    return await synthesize_to_file(text, voice, out_path, tier=tier)
 
 
 def get_audio_duration(path: Path) -> float:
@@ -51,20 +122,4 @@ def get_audio_duration(path: Path) -> float:
         out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
         return float(out.strip())
     except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
-        return max(3.0, len(text) * 0.15)
-
-
-async def synthesize_segments(segments: list[dict], dubbing_id: str, dubbing_type: str, work_dir: Path) -> list[dict]:
-    voice = resolve_voice(dubbing_id, dubbing_type)
-    results = []
-    for i, seg in enumerate(segments):
-        if seg.get("type") not in ("解说", "narration", "解说词"):
-            continue
-        text = seg.get("text", "").strip()
-        if not text:
-            continue
-        audio_path = work_dir / f"narration_{i:03d}.mp3"
-        await synthesize_to_file(text, voice, audio_path)
-        dur = get_audio_duration(audio_path)
-        results.append({"index": i, "text": text, "audio_path": str(audio_path), "duration": dur})
-    return results
+        return 3.0

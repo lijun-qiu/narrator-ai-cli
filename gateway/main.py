@@ -39,7 +39,19 @@ async def log_requests(request: Request, call_next):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "llm_configured": bool(settings.llm_api_key)}
+    from gateway.services.models import resolve_llm_model, resolve_tts_model
+
+    return {
+        "status": "ok",
+        "llm_configured": bool(settings.llm_api_key),
+        "models": {
+            "flash": resolve_llm_model("flash"),
+            "pro": resolve_llm_model("pro"),
+            "tts": resolve_tts_model(),
+            "tts_pro": resolve_tts_model("pro"),
+        },
+        "tts_provider": settings.tts_provider,
+    }
 
 
 @app.exception_handler(Exception)

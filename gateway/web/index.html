@@ -167,7 +167,11 @@
               </label>
             </div>
             <button id="wfSearchMovie" class="btn btn-ghost">搜索电影信息</button>
-            <pre id="wfMovieResult" class="code-block hidden"></pre>
+            <div id="wfMovieResultCard" class="movie-result empty">
+              <p class="movie-result-hint">输入片名后点击「搜索电影信息」，结果将显示在这里</p>
+              <div id="wfMovieResultBody" class="movie-result-body hidden"></div>
+              <pre id="wfMovieResult" class="code-block movie-result-json hidden"></pre>
+            </div>
             <button class="btn btn-primary wizard-next" data-next="2">下一步</button>
           </article>
         </div>
@@ -195,6 +199,26 @@
                   <option>英语</option>
                   <option>日语</option>
                 </select>
+              </label>
+              <label class="field">
+                <span>目标平台</span>
+                <select id="wfPlatform" class="input">
+                  <option value="douyin">抖音</option>
+                  <option value="bilibili">哔哩哔哩</option>
+                  <option value="youtube">YouTube</option>
+                  <option value="xiaohongshu">小红书</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>叙述视角</span>
+                <select id="wfPerspective" class="input">
+                  <option value="third_person">第三人称</option>
+                  <option value="first_person">第一人称</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>第一人称角色名</span>
+                <input id="wfCharacterName" class="input" placeholder="选第一人称时填写，如：常征" />
               </label>
             </div>
             <div class="btn-row">

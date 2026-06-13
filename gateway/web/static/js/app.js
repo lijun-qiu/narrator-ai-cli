@@ -194,7 +194,10 @@ async function loadTasks() {
         <td><span class="status status-${t.status}">${STATUS_LABEL[t.status] || t.status}</span></td>
         <td>${t.consumed_points ?? 0}</td>
         <td>${(t.created_at || "").slice(0, 19)}</td>
-        <td><button class="btn btn-ghost btn-sm" data-task="${t.task_id}">查看</button></td>
+        <td class="btn-row">
+          <button class="btn btn-ghost btn-sm" data-task="${t.task_id}">查看</button>
+          ${t.status === 3 ? `<button class="btn btn-ghost btn-sm" data-retry="${t.task_id}">重试</button>` : ""}
+        </td>
       </tr>`
           )
           .join("")
@@ -204,6 +207,20 @@ async function loadTasks() {
       btn.onclick = async () => {
         const detail = await API.queryTask(btn.dataset.task);
         $("#taskDetail").textContent = JSON.stringify(detail, null, 2);
+      };
+    });
+
+    tbody.querySelectorAll("[data-retry]").forEach((btn) => {
+      btn.onclick = async () => {
+        btn.disabled = true;
+        try {
+          await API.retryTask(btn.dataset.retry);
+          toast("已重新提交任务");
+          loadTasks();
+        } catch (e) {
+          toast(e.message, true);
+          btn.disabled = false;
+        }
       };
     });
   } catch (e) {
@@ -303,6 +320,83 @@ async function refreshWorkflowSelects() {
   }
 }
 
+function renderMovieResult(items) {
+  const card = $("#wfMovieResultCard");
+  const body = $("#wfMovieResultBody");
+  const pre = $("#wfMovieResult");
+
+  card.classList.remove("empty", "loading", "error");
+
+  if (!items || items.length === 0) {
+    body.innerHTML =
+      "<p class='muted'>未在片库精确命中，已用片名创建占位信息，可直接继续；有 SRT 时建议选「原声混剪」。</p>";
+    body.classList.remove("hidden");
+    pre.classList.add("hidden");
+    return;
+  }
+
+  if (items.length === 1) {
+    showMovieDetail(items[0]);
+    return;
+  }
+
+  body.innerHTML =
+    "<p class='muted' style='margin-bottom:0.5rem'>找到多个结果，请点击选择：</p>" +
+    `<div class="movie-pick-list">${items
+      .map(
+        (item, i) =>
+          `<button type="button" class="movie-pick-item" data-idx="${i}">${item.title || item.local_title || "未知"} (${item.year || "?"}) — ${(item.story_info || item.summary || "").slice(0, 40)}…</button>`
+      )
+      .join("")}</div>`;
+  body.classList.remove("hidden");
+  pre.classList.add("hidden");
+
+  body.querySelectorAll(".movie-pick-item").forEach((btn) => {
+    btn.onclick = () => {
+      body.querySelectorAll(".movie-pick-item").forEach((b) => b.classList.remove("selected"));
+      btn.classList.add("selected");
+      showMovieDetail(items[+btn.dataset.idx]);
+    };
+  });
+  showMovieDetail(items[0]);
+  body.querySelector(".movie-pick-item")?.classList.add("selected");
+}
+
+function showMovieDetail(item) {
+  wfState.movieJson = item;
+  const body = $("#wfMovieResultBody");
+  const pre = $("#wfMovieResult");
+  const title = item.title || item.local_title || "未知";
+  const meta = [
+    item.year && `年份 ${item.year}`,
+    item.type || item.genre,
+    item.director && `导演 ${item.director}`,
+    item.character_name || item.stars,
+  ].filter(Boolean);
+  const detailHtml = `
+    <div class="movie-title">${title}</div>
+    <div class="movie-meta">${meta.map((m) => `<span>${m}</span>`).join("")}</div>
+    <div class="movie-story">${item.story_info || item.summary || "暂无简介"}</div>
+  `;
+
+  const pickList = body.querySelector(".movie-pick-list");
+  let detailEl = body.querySelector(".movie-detail-pane");
+  if (pickList) {
+    if (!detailEl) {
+      detailEl = document.createElement("div");
+      detailEl.className = "movie-detail-pane";
+      detailEl.style.marginTop = "0.75rem";
+      body.appendChild(detailEl);
+    }
+    detailEl.innerHTML = detailHtml;
+  } else {
+    body.innerHTML = detailHtml;
+  }
+  body.classList.remove("hidden");
+  pre.textContent = JSON.stringify(item, null, 2);
+  pre.classList.remove("hidden");
+}
+
 function wizardGo(step) {
   $$(".wizard-step").forEach((s) => {
     const n = +s.dataset.step;
@@ -339,10 +433,14 @@ async function runWorkflow() {
       learning_model_id: templateId,
       target_mode: $("#wfTargetMode").value,
       playlet_name: movieName,
-      model: "flash",
+      model: "pro",
       language: $("#wfLanguage").value,
+      target_platform: $("#wfPlatform").value,
+      perspective: $("#wfPerspective").value,
       confirmed_movie_json: wfState.movieJson || { title: movieName, story_info: movieName },
     };
+    const charName = $("#wfCharacterName").value.trim();
+    if (charName) writingBody.target_character_name = charName;
     if (srtId) {
       writingBody.episodes_data = [{ srt_oss_key: srtId, num: 1 }];
     }
@@ -381,6 +479,7 @@ async function runWorkflow() {
     });
     setPipelineStage("clip", "done");
     const orderNum = cDone.task_order_num;
+    const capcutUrl = cDone.results?.capcut_draft_url;
 
     // Step 3: video-composing
     setPipelineStage("compose", "running");
@@ -401,12 +500,18 @@ async function runWorkflow() {
     appendLog(`完成! ${videoUrl || ""}`);
 
     wizardGo(4);
+    let resultHtml = "";
     if (videoUrl) {
-      $("#wfResultUrl").innerHTML = `<a href="${videoUrl}" target="_blank">${videoUrl}</a>`;
+      resultHtml += `<p><strong>成片：</strong><a href="${videoUrl}" target="_blank">${videoUrl}</a></p>`;
       const vid = $("#wfPreview");
       vid.src = videoUrl;
       vid.classList.remove("hidden");
     }
+    if (capcutUrl) {
+      resultHtml += `<p><strong>剪映草稿：</strong><a href="${capcutUrl}" target="_blank" download>下载 draft zip</a>（剪映 5.9 / CapCut 国际版）</p>`;
+      appendLog(`剪映草稿: ${capcutUrl}`);
+    }
+    $("#wfResultUrl").innerHTML = resultHtml;
     toast("视频生成完成!");
     loadDashboard();
   } catch (e) {
@@ -475,16 +580,30 @@ function init() {
   $("#wfSearchMovie").onclick = async () => {
     const q = $("#wfMovieName").value.trim();
     if (!q) return toast("请输入片名", true);
+
+    const btn = $("#wfSearchMovie");
+    const card = $("#wfMovieResultCard");
+    btn.classList.add("loading");
+    btn.textContent = "搜索中…";
+    card.classList.remove("empty", "error");
+    card.classList.add("loading");
+    $("#wfMovieResultBody").innerHTML = "<p class='muted'>正在调用 LLM 搜索，请稍候（约 10～30 秒）…</p>";
+    $("#wfMovieResultBody").classList.remove("hidden");
+
     try {
-      const data = await API.searchMovie(q);
-      const list = data.data || data;
-      wfState.movieJson = Array.isArray(list) ? list[0] : list;
-      const pre = $("#wfMovieResult");
-      pre.textContent = JSON.stringify(wfState.movieJson, null, 2);
-      pre.classList.remove("hidden");
+      const list = await API.searchMovie(q);
+      renderMovieResult(list);
       toast("电影信息已获取");
     } catch (e) {
+      card.classList.add("error");
+      card.classList.remove("loading");
+      $("#wfMovieResultBody").innerHTML = `<p class="muted" style="color:var(--danger)">搜索失败：${e.message}</p>`;
+      $("#wfMovieResultBody").classList.remove("hidden");
       toast(e.message, true);
+    } finally {
+      btn.classList.remove("loading");
+      btn.textContent = "搜索电影信息";
+      card.classList.remove("loading");
     }
   };
 
